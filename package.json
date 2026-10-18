@@ -1,20 +1,20 @@
 {
-  "name": "graph-neuron",
+  "name": "pj11-memgraph",
   "version": "0.1.0",
   "private": true,
-  "description": "GraphNeuron — 事件图记忆引擎（记忆=事件的图，检索=图上蔓延）。Pj11 SubPj9。",
+  "description": "Pj11 认知社群记忆图原型：mem 检索优化 + 社群图 + 分粒度 recall",
   "type": "module",
   "module": "src/index.ts",
-  "main": "src/index.ts",
+  "scripts": {
+    "build": "bun run src/cli.ts build",
+    "build:ljj": "bun run src/cli.ts build --dataset ljj",
+    "eval": "bun run src/cli.ts eval",
+    "eval:ljj": "bun run src/cli.ts eval --dataset ljj",
+    "cli": "bun run src/cli.ts",
+    "test": "bun test"
+  },
   "engines": {
     "bun": ">=1.3.0"
-  },
-  "scripts": {
-    "start": "bun run src/api.ts",
-    "dev": "bun --watch run src/api.ts",
-    "cli": "bun run src/cli.ts",
-    "test": "bun test",
-    "typecheck": "bunx tsc --noEmit"
   },
   "devDependencies": {
     "@types/bun": "^1.3.0",

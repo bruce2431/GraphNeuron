@@ -1,4 +1,10 @@
 node_modules/
-*.output
+data/
+.claude/
+
+# 个人信息查询集只留本地，不入公开仓库
+src/evalQueriesLjj.ts
+test/ljj.test.ts
 *.log
 .DS_Store
+Thumbs.db
