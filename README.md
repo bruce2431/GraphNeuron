@@ -1,5 +1,7 @@
 # MemGraph
 
+> 版本 **v1.0.0**。仓库：[bruce2431/GraphNeuron](https://github.com/bruce2431/GraphNeuron)（MemGraph 实现已合并入该公开仓库）。
+
 认知社群记忆图原型（Pj11 SubPj9）。核心命题：**认知不是因为语义相似而聚合，而是因为使用（检索次数）而聚合。**
 
 把神经元的三层结构（`l3.raw` → `l2.mem` → `l1.cog`）扩展成一张**带证据的图**，在图上做社群检测与多粒度检索，再用真实检索反馈反哺记忆结构。
