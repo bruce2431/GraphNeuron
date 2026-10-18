@@ -1,108 +1,154 @@
 /**
- * GraphNeuron — 可插拔 Embedder
+ * BGE 嵌入适配。
  *
- * 默认实现：本地 feature-hash 向量（零依赖、确定性），面向中文按「字符 unigram+bigram」、
- * 面向拉丁按「词小写」。检索的种子匹配用它；最终检索单元是蔓延后的子图。
- *
- * 接口固定，后续可替换为 BGE / 外部 embedding API（实现 embed(texts): Promise<number[][]>）。
+ * 原型复用 Pj16 Floria 现网 embedder（只读 import，不修改 Pj16 文件）：
+ * 同一模型 bge-small-zh-v1.5 / CLS 池化 / L2 归一，保证与活引擎口径一致。
+ * Pj16 不可用时降级为 512 维 feature-hash（仅保证可跑，不用于效果结论）。
  */
 
-import type { GEvent } from './schema.ts'
-import { verbalize } from './schema.ts'
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { join } from 'node:path'
+import type { MemEntry } from './types.ts'
 
-export interface Embedder {
-  readonly dim: number
-  embed(texts: string[]): Promise<number[][]>
-  embedSync(texts: string[]): number[][]
-}
+const DIM = 512
 
-const DEFAULT_DIM = 256
-
-function tokenize(text: string): string[] {
-  const out: string[] = []
-  const s = text.toLowerCase()
-  // 拉丁/数字词
-  const latin = s.match(/[a-z0-9]+/g) ?? []
-  out.push(...latin)
-  // 中文等：字符 unigram + bigram
-  const cjkRuns = s.match(/[\u3000-\u9fff\uf900-\ufaff]+/g) ?? []
-  for (const run of cjkRuns) {
-    const chars = [...run]
-    for (let i = 0; i < chars.length; i++) {
-      out.push(chars[i])
-      if (i + 1 < chars.length) out.push(chars[i] + chars[i + 1])
-    }
+function findModelCache(): string {
+  let dir = import.meta.dir
+  for (let i = 0; i < 10; i++) {
+    const p = join(dir, '.claude', 'neturon', 'cache', 'models')
+    if (existsSync(p)) return p
+    dir = join(dir, '..')
   }
-  return out
+  return join(import.meta.dir, '..', 'data', 'models')
 }
 
-function fnv1a(str: string): number {
+type EncodeFn = (texts: string[], cacheDir: string) => Promise<number[][]>
+
+let encodeImpl: EncodeFn | null = null
+
+async function getEncode(): Promise<EncodeFn> {
+  if (encodeImpl) return encodeImpl
+  try {
+    const mod = await import('../../../../Pj16-CodeAgent构建/Floria/src/tools/neturon/embedder.ts')
+    encodeImpl = mod.encode as EncodeFn
+  } catch {
+    encodeImpl = hashEncode
+  }
+  return encodeImpl
+}
+
+function fnv1a(s: string): number {
   let h = 0x811c9dc5
-  for (let i = 0; i < str.length; i++) {
-    h ^= str.charCodeAt(i)
+  for (let i = 0; i < s.length; i++) {
+    h ^= s.charCodeAt(i)
     h = Math.imul(h, 0x01000193)
   }
   return h >>> 0
 }
 
-/** 把文本散列成 L2 归一化的稀疏→稠密向量 */
-export function hashEmbed(text: string, dim = DEFAULT_DIM): number[] {
-  const v = new Array<number>(dim).fill(0)
-  for (const tok of tokenize(text)) {
-    const h = fnv1a(tok)
-    const idx = h % dim
-    const sign = (h >>> 31) & 1 ? -1 : 1
-    v[idx] += sign
+/** 降级嵌入：字符 unigram + bigram 散列，零依赖。 */
+function hashVec(text: string): number[] {
+  const v = new Array<number>(DIM).fill(0)
+  const s = text.toLowerCase()
+  const toks: string[] = []
+  const runs = s.match(/[\u3000-\u9fff\uf900-\ufaff]+|[a-z0-9]+/g) ?? []
+  for (const run of runs) {
+    if (/^[a-z0-9]+$/.test(run)) {
+      toks.push(run)
+      continue
+    }
+    const chars = [...run]
+    for (let i = 0; i < chars.length; i++) {
+      toks.push(chars[i]!)
+      if (i + 1 < chars.length) toks.push(chars[i]! + chars[i + 1]!)
+    }
+  }
+  for (const t of toks) {
+    const h = fnv1a(t)
+    v[h % DIM]! += (h >>> 31) & 1 ? -1 : 1
   }
   let norm = 0
   for (const x of v) norm += x * x
   norm = Math.sqrt(norm) || 1
-  for (let i = 0; i < dim; i++) v[i] /= norm
+  for (let i = 0; i < DIM; i++) v[i]! /= norm
   return v
 }
 
-export function cosine(a: number[], b: number[]): number {
-  const n = Math.min(a.length, b.length)
-  let dot = 0
-  for (let i = 0; i < n; i++) dot += a[i] * b[i]
-  return dot // 双方均已归一化
+async function hashEncode(texts: string[]): Promise<number[][]> {
+  return texts.map(hashVec)
 }
 
-/** 结构指纹：把 move/chara/pol 拼成加权文本后再哈希（保证结构相似的事件向量接近） */
-export function eventFingerprint(e: GEvent): string {
-  const parts: string[] = []
-  parts.push(`M:${e.move}`)
-  for (const c of e.chara1) parts.push(`A:${c}`)
-  for (const c of e.chara2) parts.push(`P:${c}`)
-  parts.push(e.pol === '-' ? 'POL:-' : 'POL:+')
-  if (e.mod) parts.push(`MOD:${e.mod}`)
-  if (e.location) parts.push(`LOC:${e.location}`)
-  return parts.join(' ')
+export function textHash(text: string): string {
+  return Bun.hash(text).toString(36)
 }
 
-/** 结构化事件向量（结构指纹为主，口语化文本为辅——结构权重更高） */
-export function eventVector(e: GEvent, dim = DEFAULT_DIM, resolveChild?: (id: string) => GEvent | undefined): number[] {
-  const a = hashEmbed(eventFingerprint(e), dim)
-  const b = hashEmbed(verbalize(e, resolveChild), dim)
-  const w = 0.7 // 结构权重
-  const out = new Array<number>(dim)
-  for (let i = 0; i < dim; i++) out[i] = w * a[i] + (1 - w) * b[i]
-  let norm = 0
-  for (const x of out) norm += x * x
-  norm = Math.sqrt(norm) || 1
-  for (let i = 0; i < dim; i++) out[i] /= norm
-  return out
+interface EmbedCache {
+  model: string
+  dim: number
+  items: Record<string, number[]>
 }
 
-export class LocalEmbedder implements Embedder {
-  readonly dim: number
-  constructor(dim = DEFAULT_DIM) {
-    this.dim = dim
-  }
-  embedSync(texts: string[]): number[][] {
-    return texts.map((t) => hashEmbed(t, this.dim))
-  }
-  async embed(texts: string[]): Promise<number[][]> {
-    return this.embedSync(texts)
-  }
+function cachePath(dataDir: string): string {
+  return join(dataDir, 'embeddings.json')
 }
+
+export function loadEmbedCache(dataDir: string): EmbedCache {
+  const p = cachePath(dataDir)
+  if (existsSync(p)) {
+    try {
+      const c = JSON.parse(readFileSync(p, 'utf-8')) as EmbedCache
+      if (c.dim === DIM && c.items) return c
+    } catch {
+      /* 损坏则重建 */
+    }
+  }
+  return { model: 'Xenova/bge-small-zh-v1.5', dim: DIM, items: {} }
+}
+
+export function saveEmbedCache(dataDir: string, cache: EmbedCache): void {
+  mkdirSync(dataDir, { recursive: true })
+  writeFileSync(cachePath(dataDir), JSON.stringify(cache))
+}
+
+/** 为所有条目的 blocks 取块级向量（缓存按文本哈希，跨条目共享）。 */
+export async function buildBlockVectors(
+  entries: MemEntry[],
+  dataDir: string,
+): Promise<{ vectors: Map<string, Float32Array[]>; fromCache: number; encoded: number }> {
+  const cache = loadEmbedCache(dataDir)
+  const missing: string[] = []
+  const seen = new Set<string>()
+  for (const e of entries) {
+    if (e.deprecatedBy) continue
+    for (const b of e.blocks) {
+      const h = textHash(b)
+      if (!cache.items[h] && !seen.has(h)) {
+        seen.add(h)
+        missing.push(b)
+      }
+    }
+  }
+  const encode = await getEncode()
+  if (missing.length) {
+    const vecs = await encode(missing, findModelCache())
+    missing.forEach((b, i) => {
+      cache.items[textHash(b)] = Array.from(vecs[i] ?? new Array(DIM).fill(0))
+    })
+    saveEmbedCache(dataDir, cache)
+  }
+  const vectors = new Map<string, Float32Array[]>()
+  for (const e of entries) {
+    if (e.deprecatedBy) continue
+    vectors.set(e.id, e.blocks.map((b) => new Float32Array(cache.items[textHash(b)] ?? new Array(DIM).fill(0))))
+  }
+  return { vectors, fromCache: cache.items ? Object.keys(cache.items).length - missing.length : 0, encoded: missing.length }
+}
+
+/** 查询向量（不入缓存）。 */
+export async function embedQuery(query: string): Promise<Float32Array> {
+  const encode = await getEncode()
+  const [v] = await encode([query], findModelCache())
+  return new Float32Array(v ?? new Array(DIM).fill(0))
+}
+
+export { DIM }
