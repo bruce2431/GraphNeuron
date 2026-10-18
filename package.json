@@ -1,6 +1,6 @@
 {
   "name": "pj11-memgraph",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "private": true,
   "description": "Pj11 认知社群记忆图原型：mem 检索优化 + 社群图 + 分粒度 recall",
   "type": "module",
